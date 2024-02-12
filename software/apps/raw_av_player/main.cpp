@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include "pico/stdlib.h"
+#include "pico/time.h"
 #include "pico/multicore.h"
 #include "hardware/clocks.h"
 #include "hardware/irq.h"
@@ -21,18 +22,17 @@ extern "C" {
 #include "ff.h"
 
 // DVDD 1.2V (1.1V seems ok too)
-#define FRAME_WIDTH 400
+#define FRAME_WIDTH 320
 #define FRAME_HEIGHT 240
 #define VREG_VSEL VREG_VOLTAGE_1_25
-#define DVI_TIMING dvi_timing_800x480p_60hz
+#define DVI_TIMING dvi_timing_640x480p_60hz
 
 #define AUDIO_SAMPLE_RATE 22050
-
+//#define ENABLE_AUDIO
 
 #define SW_A 14
 #define SW_B 15
 #define SW_C 16
-
 
 FATFS fs;
 FIL fil;
@@ -45,6 +45,31 @@ uint16_t framebuf[FRAME_WIDTH * FRAME_HEIGHT] = {0};
 
 // Note first two scanlines are pushed before DVI start
 volatile uint scanline = 2;
+
+volatile int32_t gpio_pressed = -1;
+
+// Simple Debounce: https://gist.github.com/kates/9d8b33587b01694898e3f874142db5f3
+static const uint8_t DEBOUNCE = 100;
+static bool pressed = false;
+static int32_t alarm_id = 0;
+
+int64_t enable_button(alarm_id_t alarm_id, void *user_data) {
+    pressed = false;
+	gpio_pressed = -1;
+    return 0;
+}
+
+void gpio_callback(uint gpio, uint32_t events) {
+    if (pressed) {
+        cancel_alarm(alarm_id);
+    } else {
+        pressed = true;
+        printf("Button pressed: %d\n", gpio);
+		gpio_pressed = gpio;
+    }
+
+    alarm_id = add_alarm_in_ms(DEBOUNCE, enable_button, NULL, false);
+}
 
 int mount_sd() {
 	fr = f_mount(&fs, "", 1);
@@ -105,6 +130,11 @@ int main() {
 	gpio_init(SW_B); gpio_set_dir(SW_B, GPIO_IN); gpio_pull_down(SW_B);
 	gpio_init(SW_C); gpio_set_dir(SW_C, GPIO_IN); gpio_pull_down(SW_C);
 
+	const uint32_t events = GPIO_IRQ_EDGE_RISE; //GPIO_IRQ_LEVEL_HIGH;
+	gpio_set_irq_enabled_with_callback(SW_A, events, true, &gpio_callback);
+    gpio_set_irq_enabled(SW_B, events, true);
+    gpio_set_irq_enabled(SW_C, events, true);
+
 	mount_sd();
 
 	dvi0.timing = &DVI_TIMING;
@@ -124,27 +154,63 @@ int main() {
 	size_t bytes_read = 0;
 
 	printf("Starting playback...\n");
+	// disable audio
+#ifdef ENABLE_AUDIO
 	uint dma_channel = 9;
 	struct audio_buffer_pool *ap = init_audio(AUDIO_SAMPLE_RATE, PICO_AUDIO_I2S_DATA, PICO_AUDIO_I2S_BCLK, 1, dma_channel);
-
+#endif
 	printf("Opening Video/Audio files...\n");
 
 	// Convert video to raw RGB656 litte-endian using ffmpeg, eg:
 	// ffmpeg -i BigBuckBunny_640x360.m4v -vf scale=400:240,fps=12 -c:v rawvideo -pix_fmt rgb565le BigBuckBunny2.rgb
-	fr = f_open(&fil, "BigBuckBunny2.rgb", FA_READ);
+	// scale=320:240 --edited by pk
+	fr = f_open(&fil, "video_1.rgb", FA_READ); // open default video file
 
 	// Convert audio to raw, signed, 16-bit, little-endian mono using ffmpeg, eg:
 	// ffmpeg -i BigBuckBunny_640x360.m4v -f s16le -acodec pcm_s16le -ar 22050 -ac 1 BigBuckBunny2.pcm
+#ifdef ENABLE_AUDIO
 	fr = f_open(&afil, "BigBuckBunny2.pcm", FA_READ);
-
+#endif
 	printf("Playing...\n");
 
 	while(true) {
-		vsync();
-    	update_buffer(ap, get_audio_frame);
-		f_read(&fil, (uint8_t *)&framebuf, FRAME_WIDTH * FRAME_HEIGHT * 2, &bytes_read);
-		if(bytes_read == 0) {
-			f_lseek(&fil, 0);
+		switch(gpio_pressed) {
+			case -1:
+#ifdef ENABLE_AUDIO
+				update_buffer(ap, get_audio_frame);
+#endif
+				f_read(&fil, (uint8_t *)&framebuf, FRAME_WIDTH * FRAME_HEIGHT * 2, &bytes_read);
+				if(bytes_read == 0) {
+					f_lseek(&fil, 0);
+				}
+				break;
+
+			case SW_A:
+				gpio_pressed = -1;
+				printf("Closing and opening Video/Audio files...\n");
+				fr = f_close(&fil);
+				fr = f_open(&fil, "video_1.rgb", FA_READ);
+				printf("Playing...\n");
+				break;
+
+			case SW_B:
+				gpio_pressed = -1;
+				printf("Closing and opening Video/Audio files...\n");
+				fr = f_close(&fil);
+				fr = f_open(&fil, "video_2.rgb", FA_READ);
+				printf("Playing...\n");
+				break;
+
+			case SW_C:
+				gpio_pressed = -1;
+				printf("Closing and opening Video/Audio files...\n");
+				fr = f_close(&fil);
+				fr = f_open(&fil, "video_3.rgb", FA_READ);
+				printf("Playing...\n");
+				break;
+
+			default:
+				break;
 		}
 	}
 }
