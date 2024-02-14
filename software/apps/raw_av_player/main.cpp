@@ -180,6 +180,7 @@ int main() {
 		}
 		gpio_last_pressed_bitmask = gpio_pressed_bitmask;
 
+		vsync();
 		f_read(&fil, (uint8_t *)&framebuf, FRAME_WIDTH * FRAME_HEIGHT * 2, &bytes_read);
 		if(bytes_read == 0) {
 			f_lseek(&fil, 0);
